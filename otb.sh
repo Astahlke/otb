@@ -17,25 +17,28 @@ help(){
        display otb version and exit
 
     -s or --supress
-       supress stop and checks, and submit without sending to background
+       supress \"stop and gather user input\", and submit without sending to background
 
     -c or --check
        perform checks to insure smoother operation
 
+    --lite
+       don't perform anything with HiC
+
   required:
     -f or --forward
-       a fastq or fastq.gz file for the pipline, order does not matter
+       a fastq or fastq.gz file for the pipline, in HiC runs this is one of the sequencing files, in a trio run, this is either the maternal or paternal sequences, order does not matter
 
     -r or --reverse
-       another fastq or fastq.gz file for the pipeline, order does not matter
+       another fastq or fastq.gz file for the pipeline, in HiC runs this is one of the sequencing files, in a trio run, this is either the maternal or paternal sequences, order does not matter
 
     -in or --reads
-       path to reads (generally from pacbio), may include a wildcard for multiple files, can be fastq or bam
+       path to HiFi reads (generally from pacbio), may include a wildcard for multiple files, can be fastq or bam
 
 
   suggested:
     -m or --mode
-       mode to use, must be one of \"phasing\",\"homozygous\",\"heterozygous\",\"trio\", default: homozygous
+       mode to use, must be one of \"phasing\",\"homozygous\",\"heterozygous\",\"primary\",\"trio\", default: homozygous
 
     -t or --threads
        number of threads to use, clusters sometimes use this as number of cores, default: 20
@@ -114,6 +117,7 @@ while [ $# -gt 0 ] ; do
     -y | --yahs) YAHS="true";;
     -u | --runner) RUNNER="$2";;
     -k | --kmer) KMER="$2";;
+    --lite) LITE="true";;
     --busco) BUSCO="--busco ";;
     --polish-type) POLISHTYPE="$2";;
     --auto-lineage) LINEAGE="auto-lineage";;
@@ -177,6 +181,7 @@ if [ -n "$MODE" ]; then
     homozygous) RUN+="--mode=\"homozygous\" ";;
     heterozygous) RUN+="--mode=\"heterozygous\" ";;
     trio) RUN+="--mode=\"trio\" ";;
+    primary) RUN+="--mode=\"primary\" ";;
     *) error "mode set to $MODE, not an actual mode";;
   esac
 else
@@ -229,6 +234,7 @@ eval $prefetch_container
 
 if [ -n "$TEST" ]; then
   check_container="./scr/check_containers.sh"
+  [ -n "$YAHS" ] && check_container+=" -y"
   [ -n "$BUSCO" ] && check_container+=" -b"
   [ -n "$POLISHTYPE" ] && check_container+=" -p $POLISHTYPE"
   [ -n "$NXF_SINGULARITY_CACHEDIR" ] || check_container+=" -l ./work/singularity"
@@ -274,6 +280,8 @@ state "running busco, checking busco things"
 else
   state "   ...not running busco"
 fi
+
+[ -n "$LITE" ] && RUN+="--lite "
 
 [ -z "$SUPRESS" ] && RUN+="-bg"
 

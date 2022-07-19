@@ -1,16 +1,21 @@
 #!/usr/bin/env nextflow
 //Global Parameters
 params.assembly = "an_assembly"
-params.readin = "$baseDir/data/*.bam"
+
+params.readin = "NO_FILE"
+params.readf = "NO_FILE"
+params.readr = "NO_FILE"
 params.hicreadf = "$baseDir/data/*.R1.fastq.gz"
 params.hicreadr = "$baseDir/data/*.R2.fastq.gz"
 params.matreadf = "$baseDir/data/*.R1.fastq.gz"
 params.matreadr = "$baseDir/data/*.R2.fastq.gz"
 params.patreadf = "$baseDir/data/*.R1.fastq.gz"
 params.patreadr = "$baseDir/data/*.R2.fastq.gz"
+
 params.outfasta = "genome.out.fasta"
 params.outdir = 'results'
 params.threads = '21'
+params.lite = false
 //Runtype Parameters
 params.scaffold = false
 params.kmer = 'kmc'
@@ -37,12 +42,16 @@ left_matfastq_check = Channel.fromPath(params.matreadr)
 right_patfastq_check = Channel.fromPath(params.patreadf)
 left_patfastq_check = Channel.fromPath(params.patreadr)
 
+right_optional = file(params.readr)
+left_optional = file(params.readf)
+
 bam_ch.into {
   in_check_ch
   in_Hifi_ch
 }
 
 process check_in_file {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus = 1
 
@@ -91,16 +100,19 @@ process check_in_file {
 }
 
 process check_fastq {
+  label 'shortq'
   cpus = 1
 
   input:
     file right_fastq from right_hicfastq_check
     file left_fastq from left_hicfastq_check
   output:
-    file 'out/right.fastq.gz' into right_fastq_HiFiASM, right_fastq_hicstuff, right_fastq_hicstuff_polish
-    file 'out/left.fastq.gz' into left_fastq_HiFiASM, left_fastq_hicstuff, left_fastq_hicstuff_polish
+    file 'out/right.fastq.gz' into right_fastq_hicstuff, right_fastq_hicstuff_polish, right_yahs, simple_right_yahs, merfin_right_yahs, dv_right_yahs
+    file 'out/left.fastq.gz' into left_fastq_hicstuff, left_fastq_hicstuff_polish, left_yahs, simple_left_yahs, merfin_left_yahs, dv_left_yahs
     file 'out/*.fastq.gz' into fasta_in_ch
     stdout check_fastq_output
+ when:
+    !params.lite
   shell:
   '''
    state () { printf "%b\n" "[$(date)]: $*" 2>&1; }
@@ -225,13 +237,14 @@ process check_fastq_trio {
 }
 
 process HiFiAdapterFilt {
+  label 'shortq'
   container = 'dmolik/pbadapterfilt'
   cpus = params.threads
 
   input:
     file in_file from in_Hifi_ch.flatten()
   output:
-    file '*.filt.fastq' into hifiasm_filt_fastq_ch, filt_fastq_ch, minimap_merfin_filt_ch, meryl_filt_ch, yahs_filt_reads, yahs_simple_filt_reads, yahs_merfin_filt_reads, yahs_dv_filt_reads
+    file '*.filt.fastq' into hifiasm_filt_fastq_ch, filt_fastq_ch, minimap_dv_filt_ch,  minimap_merfin_filt_ch, meryl_filt_ch
     stdout pbadapterfilt_output
   """
     touch pbadapterfilt.flag.txt
@@ -244,47 +257,60 @@ process HiFiAdapterFilt {
 }
 
 process HiFiASM {
+  label 'longq'
   container = 'dmolik/hifiasm'
   cpus = params.threads
 
   input:
     file fasta from hifiasm_filt_fastq_ch.collect()
+    path left from left_optional
+    path right from right_optional
 
   output:
     file '*.gfa' into gfa_ch
     file '*.ec.fa' into fasta_ec_ch
     stdout HiFiASM_output
+  
   script:
+    if( params.mode == 'phasing' && params.readf != 'NO_FILE' && params.readr != 'NO_FILE' )
+    """
+      touch hifiasm.flag.txt
+      hifiasm -o ${params.assembly} -t ${task.cpus} --write-paf --write-ec --h1 ${left} --h2 ${right} ${fasta} 2>&1
+      echo "finished alignment"
+      sleep 120;
+      exit 0;
+    """
+    else if( params.mode == 'purge.off' )
+    """
+      touch hifiasm.flag.txt
+      hifiasm -o ${params.assembly} -t ${task.cpus} --write-paf --write-ec -l0 ${fasta} 2>&1
+      echo "finished alignment"
+      sleep 120;
+      exit 0;
+    """
+    else if( params.mode == 'default')
+    """
+      touch hifiasm.flag.txt
+      hifiasm -o ${params.assembly} -t ${task.cpus} --write-paf --write-ec ${fasta} 2>&1
+      echo "finished alignment"
+      sleep 120;
+      exit 0;
+    """
+    else if( params.mode == 'primary')
+    """
+      touch hifiasm.flag.txt
+      hifiasm -o ${params.assembly} --primary -t ${task.cpus} --write-paf --write-ec ${fasta} 2>&1
+      echo "finished alignment"
+      sleep 120;
+      exit 0;
+    """
+    else
+      error "Invalid alignment mode: ${params.mode}"
 
- if( params.mode == 'purge.off' )
-  """
-    touch hifiasm.flag.txt
-    hifiasm -o ${params.assembly} -t ${task.cpus} --write-paf --write-ec -l0 ${fasta} 2>&1
-    echo "finished contig assembly with purging turned off"
-    sleep 120;
-    exit 0;
-  """
-  else if( params.mode == 'primary')
-  """
-    touch hifiasm.flag.txt
-    hifiasm -o ${params.assembly} -t ${task.cpus} --primary --write-paf --write-ec ${fasta} 2>&1
-    echo "finished contig assembly in primary mode"
-    sleep 120;
-    exit 0;
-  """
-  else if( params.mode == 'default')
-  """
-    touch hifiasm.flag.txt
-    hifiasm -o ${params.assembly} -t ${task.cpus} --write-paf --write-ec ${fasta} 2>&1
-    echo "finished contig assembly in default mode"
-    sleep 120;
-    exit 0;
-  """
-  else
-    error "Invalid alignment mode: ${params.mode}"
 }
 
 process HiFiASM_trio {
+  label 'longq'
   container = 'dmolik/hifiasm'
   cpus = params.threads
 
@@ -301,7 +327,7 @@ process HiFiASM_trio {
     stdout HiFiASM_output
 
   when:
-      params.trio
+      params.trio && params.readf != 'NO_FILE' && params.readr != 'NO_FILE'
 
   script:
   """
@@ -315,34 +341,8 @@ process HiFiASM_trio {
   """
 }
 
-process HiFiASM_phasing {
-  container = 'dmolik/hifiasm'
-  cpus = params.threads
-
-  input:
-    file fasta from hifiasm_filt_fastq_ch.collect()
-    file left from left_fastq_HiFiASM
-    file right from right_fastq_HiFiASM
-
-  output:
-    file '*.gfa' into gfa_ch
-    file '*.ec.fa' into fasta_ec_ch
-    stdout HiFiASM_output
-
-  when:
-    params.phasing
-
-  script:
-  """
-    touch hifiasm.flag.txt
-    hifiasm -o ${params.assembly} -t ${task.cpus} --write-paf --write-ec --h1 ${left} --h2 ${right} ${fasta} 2>&1
-    echo "finished contig assembly"
-    sleep 120;
-    exit 0;
-  """
-}
-
 process gfa2fasta {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'rellink'
   container = 'pvstodghill/any2fasta'
   cpus 1
@@ -364,6 +364,7 @@ process gfa2fasta {
 }
 
 process busco_gfa {
+  label 'longq'
   publishDir "${params.outdir}/busco_no_polish", mode: 'rellink'
   container = 'ezlabgva/busco:v5.2.2_cv1'
   cpus = params.threads
@@ -421,6 +422,7 @@ process busco_gfa {
 }
 
 process ragtag_dot_py {
+  label 'mediumq'
   container = 'dmolik/ragtag'
   cpus = params.threads
 
@@ -442,6 +444,7 @@ process ragtag_dot_py {
 }
 
 process faidx {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus 1
 
@@ -462,6 +465,7 @@ process faidx {
 }
 
 process yahs_faidx {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus 1
 
@@ -483,6 +487,7 @@ process yahs_faidx {
 }
 
 process hicstuff {
+  label 'longq'
   publishDir "${params.outdir}/hicstuff", mode: 'rellink'
   container = 'koszullab/hicstuff'
   cpus = params.threads
@@ -507,6 +512,7 @@ process hicstuff {
 }
 
 process hicstuff_polish {
+  label 'longq'
   publishDir "${params.outdir}/hicstuff", mode: 'rellink'
   container = 'koszullab/hicstuff'
   cpus = params.threads
@@ -535,6 +541,7 @@ process hicstuff_polish {
 }
 
 process Shhquis_dot_jl {
+  label 'mediumq'
   publishDir "${params.outdir}/genome", mode: 'rellink'
   container = 'dmolik/shhquis'
   cpus 1
@@ -560,6 +567,7 @@ process Shhquis_dot_jl {
 }
 
 process K_mer_counting {
+  label 'mediumq'
   container = 'dmolik/k-mer-counting-tools'
   cpus = params.threads
 
@@ -593,6 +601,7 @@ process K_mer_counting {
 }
 
 process genomescope2 {
+  label 'mediumq'
   publishDir "${params.outdir}/genomescope", mode: 'rellink'
   container = 'dmolik/genomescope2'
   cpus = params.threads
@@ -617,6 +626,7 @@ process genomescope2 {
 }
 
 process simple_polish {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus = 1
 
@@ -638,6 +648,7 @@ process simple_polish {
 }
 
 process minimap_for_merfin {
+  label 'mediumq'
   container = 'dmolik/ragtag'
   cpus = params.threads
 
@@ -659,6 +670,7 @@ process minimap_for_merfin {
 }
 
 process samtools_mpileup_merfin {
+  label 'mediumq'
   container = 'mgibio/samtools:1.9'
   cpus = params.threads
 
@@ -684,6 +696,7 @@ process samtools_mpileup_merfin {
 }
 
 process bcftools_refmt {
+  label 'shortq'
   container = 'mgibio/bcftools:1.9'
   cpus = params.threads
 
@@ -719,6 +732,7 @@ process bcftools_refmt {
 }
 
 process merfin {
+  label 'longq'
   publishDir "${params.outdir}/merfin", mode: 'rellink'
   container = 'dmolik/merfin'
   cpus = params.threads
@@ -749,11 +763,12 @@ process merfin {
 }
 
 process minimap_for_deep_variant {
+  label 'mediumq'
   container = 'dmolik/ragtag'
   cpus = params.threads
 
   input:
-    file filt_reads from filt_fastq_ch
+    file filt_reads from minimap_dv_filt_ch
     file genome from shhquis_dv_minimap_ch
   output:
     file "mapped.sam" into sam_for_dv_ch
@@ -771,6 +786,7 @@ process minimap_for_deep_variant {
 
 
 process samtools_index_for_deep_variant {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus = params.threads
 
@@ -796,6 +812,7 @@ process samtools_index_for_deep_variant {
 }
 
 process deep_variant {
+  label 'longq'
   publishDir "${params.outdir}/deepvariant", mode: 'rellink'
   container = 'google/deepvariant'
   cpus = params.threads
@@ -822,6 +839,7 @@ process deep_variant {
 }
 
 process dv_bcftools {
+  label 'mediumq'
   publishDir "${params.outdir}/genome", mode: 'rellink'
   container = 'mgibio/bcftools:1.9'
   cpus = params.threads
@@ -847,6 +865,7 @@ process dv_bcftools {
 }
 
 process merfin_bcftools {
+  label 'mediumq'
   publishDir "${params.outdir}/genome", mode: 'rellink'
   container = 'mgibio/bcftools:1.9'
   cpus = params.threads
@@ -871,91 +890,100 @@ process merfin_bcftools {
   """
 }
 
-process minimap_for_yahs {
-  container = 'dmolik/ragtag'
+process bwa_for_yahs {
+  label 'mediumq'
+  container = 'dceoy/bwa-mem2'
   cpus = params.threads
 
   input:
-    file filt_reads from yahs_filt_reads
+    file left_reads from left_yahs
+    file right_reads from right_yahs
     file genome from no_polish_yahs_align_genome_ch
   output:
     file "mapped.sam" into yahs_sam_ch
-    stdout minimap_for_yahs_output
+    stdout bwa_for_yahs_output
   when:
       params.yahs
     """
-      touch minimap.yahs.flag.sh
-      minimap2 -t ${task.cpus} -a ${genome} ${filt_reads} > mapped.sam
-      echo "finished minimap"
+      touch bwa.yahs.flag.sh
+      bwa-mem2 mem -t ${task.cpus} -5 -S -P ${genome} ${left_reads} ${right_reads} > mapped.sam
+      echo "finished bwa"
       sleep 120;
       exit 0;
    """
 }
 
-process minimap_for_simple_yahs {
-  container = 'dmolik/ragtag'
+process bwa_for_simple_yahs {
+  label 'mediumq'
+  container = 'dceoy/bwa-mem2'
   cpus = params.threads
 
   input:
-    file filt_reads from yahs_simple_filt_reads
+    file left_reads from simple_left_yahs
+    file right_reads from simple_right_yahs
     file genome from yahs_simple_align_genome_ch
   output:
     file "mapped.sam" into yahs_simple_sam_ch
-    stdout minimap_for_yahs_simple_output
+    stdout bwa_for_yahs_simple_output
   when:
       params.yahs
     """
       touch minimap.yahs.simple.flag.sh
-      minimap2 -t ${task.cpus} -a ${genome} ${filt_reads} > mapped.sam
-      echo "finished minimap"
+      bwa-mem2 mem -t ${task.cpus} -5 -S -P ${genome} ${left_reads} ${right_reads} > mapped.sam
+      echo "finished bwa"
       sleep 120;
       exit 0;
    """
 }
 
-process minimap_for_merfin_yahs {
-  container = 'dmolik/ragtag'
+process bwa_for_merfin_yahs {
+  label 'mediumq'
+  container = 'dceoy/bwa-mem2'
   cpus = params.threads
 
   input:
-    file filt_reads from yahs_merfin_filt_reads
+    file left_reads from merfin_left_yahs
+    file right_reads from merfin_right_yahs
     file genome from yahs_merfin_align_genome_ch
   output:
     file "mapped.sam" into yahs_merfin_sam_ch
-    stdout minimap_for_yahs_merfin_output
+    stdout bwa_for_yahs_merfin_output
   when:
       params.yahs
     """
-      touch minimap.yahs.merfin.flag.sh
-      minimap2 -t ${task.cpus} -a ${genome} ${filt_reads} > mapped.sam
-      echo "finished minimap"
+      touch bwa.yahs.merfin.flag.sh
+      bwa-mem2 mem -t ${task.cpus} -5 -S -P ${genome} ${left_reads} ${right_reads} > mapped.sam
+      echo "finished bwa"
       sleep 120;
       exit 0;
    """
 }
 
-process minimap_for_dv_yahs {
-  container = 'dmolik/ragtag'
+process bwa_for_dv_yahs {
+  label 'mediumq'
+  container = 'dceoy/bwa-mem2'
   cpus = params.threads
 
   input:
-    file filt_reads from yahs_dv_filt_reads
+    file left_reads from dv_left_yahs
+    file right_reads from dv_right_yahs
     file genome from yahs_dv_align_genome_ch
   output:
     file "mapped.sam" into yahs_dv_sam_ch
-    stdout minimap_for_yahs_dv_output
+    stdout bwa_for_yahs_dv_output
   when:
       params.yahs
     """
-      touch minimap.yahs.merfin.flag.sh
-      minimap2 -t ${task.cpus} -a ${genome} ${filt_reads} > mapped.sam
-      echo "finished minimap"
+      touch bwa.yahs.merfin.flag.sh
+      bwa-mem2 mem -t ${task.cpus} -5 -S -P ${genome} ${left_reads} ${right_reads} > mapped.sam
+      echo "finished bwa"
       sleep 120;
       exit 0;
    """
 }
 
 process bam_sort_for_yahs {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus = params.threads
 
@@ -977,6 +1005,7 @@ process bam_sort_for_yahs {
 }
 
 process bam_sort_for_simple_yahs {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus = params.threads
 
@@ -998,6 +1027,7 @@ process bam_sort_for_simple_yahs {
 }
 
 process bam_sort_for_merfin_yahs {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus = params.threads
 
@@ -1019,6 +1049,7 @@ process bam_sort_for_merfin_yahs {
 }
 
 process bam_sort_for_dv_yahs {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus = params.threads
 
@@ -1040,6 +1071,7 @@ process bam_sort_for_dv_yahs {
 }
 
 process yahs {
+  label 'mediumq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'dmolik/yahs'
 
@@ -1059,6 +1091,7 @@ process yahs {
 }
 
 process simple_yahs {
+  label 'mediumq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'dmolik/yahs'
 
@@ -1078,6 +1111,7 @@ process simple_yahs {
 }
 
 process merfin_yahs_faidx {
+  label 'mediumq'
   container = 'mgibio/samtools:1.9'
   cpus 1
 
@@ -1099,6 +1133,7 @@ process merfin_yahs_faidx {
 }
 
 process dv_yahs_faidx {
+  label 'mediumq'
   container = 'mgibio/samtools:1.9'
   cpus 1
 
@@ -1120,6 +1155,7 @@ process dv_yahs_faidx {
 }
 
 process merfin_yahs {
+  label 'mediumq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'dmolik/yahs'
 
@@ -1140,6 +1176,7 @@ process merfin_yahs {
 
 
 process dv_yahs {
+  label 'mediumq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'dmolik/yahs'
 
@@ -1159,6 +1196,7 @@ process dv_yahs {
 }
 
 process ragtag_dot_py_hap_simple_polish {
+  label 'longq'
   publishDir "${params.outdir}/genome", mode: 'rellink'
   container = 'dmolik/ragtag'
   cpus = params.threads
@@ -1183,6 +1221,7 @@ process ragtag_dot_py_hap_simple_polish {
 }
 
 process ragtag_dot_py_hap_merfin_polish {
+  label 'longq'
   publishDir "${params.outdir}/genome", mode: 'rellink'
   container = 'dmolik/ragtag'
   cpus = params.threads
@@ -1206,6 +1245,7 @@ process ragtag_dot_py_hap_merfin_polish {
 }
 
 process ragtag_dot_py_hap_deep_variant_polish {
+  label 'longq'
   publishDir "${params.outdir}/genome", mode: 'rellink'
   container = 'dmolik/ragtag'
   cpus = params.threads
@@ -1230,6 +1270,7 @@ process ragtag_dot_py_hap_deep_variant_polish {
 }
 
 process ragtag_dot_py_yahs {
+  label 'longq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'dmolik/ragtag'
   cpus = params.threads
@@ -1254,6 +1295,7 @@ process ragtag_dot_py_yahs {
 }
 
 process ragtag_dot_py_simple_yahs {
+  label 'longq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'dmolik/ragtag'
   cpus = params.threads
@@ -1278,6 +1320,7 @@ process ragtag_dot_py_simple_yahs {
 }
 
 process ragtag_dot_py_merfin_yahs {
+  label 'longq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'dmolik/ragtag'
   cpus = params.threads
@@ -1302,6 +1345,7 @@ process ragtag_dot_py_merfin_yahs {
 }
 
 process ragtag_dot_py_dv_yahs {
+  label 'longq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'dmolik/ragtag'
   cpus = params.threads
@@ -1326,6 +1370,7 @@ process ragtag_dot_py_dv_yahs {
 }
 
 process simple_busco_fasta {
+  label 'longq'
   publishDir "${params.outdir}/busco_polish", mode: 'rellink'
   container = 'ezlabgva/busco:v5.2.2_cv1'
   cpus = params.threads
@@ -1377,6 +1422,7 @@ process simple_busco_fasta {
 }
 
 process merfin_busco_fasta {
+  label 'longq'
   publishDir "${params.outdir}/busco_polish", mode: 'rellink'
   container = 'ezlabgva/busco:v5.2.2_cv1'
   cpus = params.threads
@@ -1428,6 +1474,7 @@ process merfin_busco_fasta {
 }
 
 process dv_busco_fasta {
+  label 'longq'
   publishDir "${params.outdir}/busco_polish", mode: 'rellink'
   container = 'ezlabgva/busco:v5.2.2_cv1'
   cpus = params.threads
@@ -1479,6 +1526,8 @@ process dv_busco_fasta {
 }
 
 process yahs_busco_fasta {
+  label 'longq'
+  container = 'ezlabgva/busco:v5.2.2_cv1'
   publishDir "${params.outdir}/busco_no_polish/yahs", mode: 'rellink'
   input:
     file fasta from yahs_no_polish_busco_ch
@@ -1527,6 +1576,8 @@ process yahs_busco_fasta {
 }
 
 process yahs_simple_busco_fasta {
+  label 'longq'
+  container = 'ezlabgva/busco:v5.2.2_cv1'
   publishDir "${params.outdir}/busco_polish/yahs", mode: 'rellink'
   input:
     file fasta from yahs_simple_polish_busco_ch
@@ -1575,6 +1626,8 @@ process yahs_simple_busco_fasta {
 }
 
 process yahs_merfin_busco_fasta {
+  label 'longq'
+  container = 'ezlabgva/busco:v5.2.2_cv1'
   publishDir "${params.outdir}/busco_polish/yahs", mode: 'rellink'
   input:
     file fasta from yahs_merfin_polish_busco_ch
@@ -1623,6 +1676,8 @@ process yahs_merfin_busco_fasta {
 }
 
 process yahs_merfin_dv_fasta {
+  label 'longq'
+  container = 'ezlabgva/busco:v5.2.2_cv1'
   publishDir "${params.outdir}/busco_polish/yahs", mode: 'rellink'
   input:
     file fasta from yahs_dv_polish_busco_ch
@@ -1671,6 +1726,7 @@ process yahs_merfin_dv_fasta {
 }
 
 process fasta_in_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'copy'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1688,6 +1744,7 @@ process fasta_in_dot_sh {
 }
 
 process gfa2fasta_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'copy'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1705,6 +1762,7 @@ process gfa2fasta_stats_dot_sh {
 }
 
 process ragtag_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'copy'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1722,6 +1780,7 @@ process ragtag_stats_dot_sh {
 }
 
 process shhquis_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'copy'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1739,6 +1798,7 @@ process shhquis_stats_dot_sh {
 }
 
 process merfin_vcf_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'copy'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1756,6 +1816,7 @@ process merfin_vcf_stats_dot_sh {
 }
 
 process dv_vcf_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'copy'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1774,6 +1835,7 @@ process dv_vcf_stats_dot_sh {
 
 
 process simple_hap_patch_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'copy'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1792,6 +1854,7 @@ process simple_hap_patch_stats_dot_sh {
 
 
 process merfin_hap_patch_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'copy'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1809,6 +1872,7 @@ process merfin_hap_patch_stats_dot_sh {
 }
 
 process dv_hap_patch_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome", mode: 'copy'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1826,6 +1890,7 @@ process dv_hap_patch_stats_dot_sh {
 }
 
 process yahs_no_polish_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1843,6 +1908,7 @@ process yahs_no_polish_stats_dot_sh {
 }
 
 process yahs_simple_polish_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1860,6 +1926,7 @@ process yahs_simple_polish_stats_dot_sh {
 }
 
 process yahs_merfin_polish_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1877,6 +1944,7 @@ process yahs_merfin_polish_stats_dot_sh {
 }
 
 process yahs_dv_polish_stats_dot_sh {
+  label 'shortq'
   publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
   container = 'bryce911/bbtools'
   cpus 1
@@ -1894,6 +1962,7 @@ process yahs_dv_polish_stats_dot_sh {
 }
 
 process yahs_hap_patch_stats_dot_sh {
+   label 'shortq'
    publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
    container = 'bryce911/bbtools'
    cpus 1
@@ -1911,6 +1980,7 @@ process yahs_hap_patch_stats_dot_sh {
 }
 
 process yahs_hap_patch_simple_polish_stats_dot_sh {
+   label 'shortq'
    publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
    container = 'bryce911/bbtools'
    cpus 1
@@ -1928,6 +1998,7 @@ process yahs_hap_patch_simple_polish_stats_dot_sh {
 }
 
 process yahs_hap_patch_merfin_polish_stats_dot_sh {
+   label 'shortq'
    publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
    container = 'bryce911/bbtools'
    cpus 1
@@ -1945,6 +2016,7 @@ process yahs_hap_patch_merfin_polish_stats_dot_sh {
 }
 
 process yahs_hap_patch_dv_polish_stats_dot_sh {
+   label 'shortq'
    publishDir "${params.outdir}/genome/yahs", mode: 'rellink'
    container = 'bryce911/bbtools'
    cpus 1
@@ -1962,6 +2034,7 @@ process yahs_hap_patch_dv_polish_stats_dot_sh {
 }
 
 process HiFiASM_Version {
+  label 'shortq'
   container = 'dmolik/hifiasm'
   cpus 1
 
@@ -1977,6 +2050,7 @@ process HiFiASM_Version {
 }
 
 process any2fasta_Version {
+  label 'shortq'
   container = 'pvstodghill/any2fasta'
   cpus 1
 
@@ -1992,6 +2066,7 @@ process any2fasta_Version {
 }
 
 process ragtag_Version {
+  label 'shortq'
   container = 'dmolik/ragtag'
   cpus 1
 
@@ -2007,6 +2082,7 @@ process ragtag_Version {
 }
 
 process samtools_Version {
+  label 'shortq'
   container = 'mgibio/samtools:1.9'
   cpus 1
 
@@ -2022,6 +2098,7 @@ process samtools_Version {
 }
 
 process YaHS_Version {
+  label 'shortq'
   container = 'dmolik/yahs'
   cpus 1
 
@@ -2037,7 +2114,26 @@ process YaHS_Version {
   """
 }
 
+process bwa_mem_2_Version {
+  label 'shortq'
+  container = 'dceoy/bwa-mem2'
+  cpus 1
+
+  output:
+    stdout bwa_mem_2_version
+  when:
+    params.yahs
+  """
+    touch bwa_version.flag.txt
+    echo "bwa-mem2 Version:"
+    bwa-mem2 version
+    exit 0;
+  """
+}
+
+
 process bcftools_Version {
+  label 'shortq'
   container = 'mgibio/bcftools:1.9'
   cpus 1
 
@@ -2055,6 +2151,7 @@ process bcftools_Version {
 }
 
 process hicstuff_Version {
+  label 'shortq'
   container = 'koszullab/hicstuff'
   cpus 1
 
@@ -2070,6 +2167,7 @@ process hicstuff_Version {
 }
 
 process bbtools_Version {
+  label 'shortq'
   container = 'bryce911/bbtools'
   cpus 1
 
@@ -2085,6 +2183,7 @@ process bbtools_Version {
 }
 
 process deepvariant_Version {
+   label 'shortq'
    container = 'google/deepvariant'
    cpus 1
 
@@ -2102,6 +2201,7 @@ process deepvariant_Version {
 }
 
 process k_mer_Version {
+  label 'shortq'
   cpus 1
 
   input:
@@ -2117,6 +2217,7 @@ process k_mer_Version {
 }
 
 process genomescope_Version {
+  label 'shortq'
   cpus 1
 
   input:
@@ -2132,6 +2233,7 @@ process genomescope_Version {
 }
 
 process merfin_Version {
+  label 'shortq'
   cpus 1
 
   output:
@@ -2141,13 +2243,15 @@ process merfin_Version {
 
   """
     touch merfin_version.flag.txt
-    echo "merfin  - - - - - - beta?"
+    echo "merfin  Version:"
+    echo "beta?"
     exit 0;
   """
 
 }
 
 process BUSCO_Version {
+  label 'shortq'
   cpus 1
 
   output:
@@ -2157,13 +2261,15 @@ process BUSCO_Version {
 
   """
     touch busco_version.flag.txt
-    echo "BUSCO  - - - - - - - v5.2.2_cv1"
+    echo "BUSCO  Version:"
+    echo "v5.2.2_cv1"
     exit 0;
   """
 
 }
 
 process shhquis_Version {
+  label 'shortq'
   cpus 1
 
   output:
@@ -2173,12 +2279,15 @@ process shhquis_Version {
 
   """
     touch shhquis_version.flag.txt
-    echo "Shhquis.jl - - - - - 0.1.0"
+    echo "Shhquis.jl Version:"
+    echo "0.1.0"
     exit 0;
   """
 }
 
 process HiFiAdapterFilt_Version {
+  label 'shortq'
+  container = 'dmolik/pbadapterfilt'
   cpus 1
 
   output:
@@ -2186,7 +2295,8 @@ process HiFiAdapterFilt_Version {
 
   """
     touch hifiadapterfilt_version.flag.txt
-    echo "HiFiAdapterFilt  - - v2.0.0"
+    echo "HiFiAdapterFilt Version:"
+    pbadapterfilt.sh -version
     exit 0;
   """
 }
@@ -2272,17 +2382,17 @@ merfin_bcftools_output
 dv_bcftools_output
    .collectFile(name:'bcftools.log.txt', newLine: true, storeDir:"${params.outdir}/genome/log")
 
-minimap_for_yahs_output
-   .collectFile(name:'minimap.log.txt', newLine: true, storeDir:"${params.outdir}/genome/yahs/log")
+bwa_for_yahs_output
+   .collectFile(name:'bwa.log.txt', newLine: true, storeDir:"${params.outdir}/genome/yahs/log")
 
-minimap_for_yahs_simple_output
-   .collectFile(name:'minimap.polished.log.txt', newLine: true, storeDir:"${params.outdir}/genome/yahs/log")
+bwa_for_yahs_simple_output
+   .collectFile(name:'bwa.polished.log.txt', newLine: true, storeDir:"${params.outdir}/genome/yahs/log")
 
-minimap_for_yahs_merfin_output
-   .collectFile(name:'minimap.polished.log.txt', newLine: true, storeDir:"${params.outdir}/genome/yahs/log")
+bwa_for_yahs_merfin_output
+   .collectFile(name:'bwa.polished.log.txt', newLine: true, storeDir:"${params.outdir}/genome/yahs/log")
 
-minimap_for_yahs_dv_output
-   .collectFile(name:'minimap.polished.log.txt', newLine: true, storeDir:"${params.outdir}/genome/yahs/log")
+bwa_for_yahs_dv_output
+   .collectFile(name:'bwa.polished.log.txt', newLine: true, storeDir:"${params.outdir}/genome/yahs/log")
 
 bam_sort_for_yahs_output
    .collectFile(name:'bam.sort.log.txt', newLine: true, storeDir:"${params.outdir}/genome/yahs/log")
@@ -2351,6 +2461,10 @@ samtools_version
 yahs_version
    .collectFile(name:'yahs_version.txt', newLine: true, storeDir: "${params.outdir}/software_versions")
    .view{ it.text }
+
+bwa_mem_2_version
+    .collectFile(name:'bwa_mem_2_version.txt', newLine: true, storeDir: "${params.outdir}/software_versions")
+    .view{ it.text }
 
 bcftools_version
    .collectFile(name:'bcftools_version.txt', newLine: true, storeDir: "${params.outdir}/software_versions")
